@@ -11,7 +11,7 @@ from binance import BinanceSocketManager
 import keys
 
 # ==========SETUP==========
-SOCKET = "wss://stream.binance.us:9443/ws/ethusdt@kline_1m"
+# SOCKET = "wss://stream.binance.us:9443/ws/ethusdt@kline_1m"
 
 TRADE_SYMBOL = "ETHUSDT"
 STD_TQ = 0.005 # Default trade quantity
@@ -23,11 +23,15 @@ RSI_OS = 30
 
 in_position = False
 position = 0
+have_data = False
 
 engine = sqlalchemy.create_engine(f'sqlite:///{TRADE_SYMBOL}stream.db')
 client = Client(keys.API_KEY, keys.SECRET_KEY)
 
 def log(msg):
+    """
+    Writes the actions to a log file
+    """
     time = datetime.now().strftime("%Y%m%d%H%M")
     try:
         with open("./log.txt", "a+") as f:
@@ -38,7 +42,7 @@ def log(msg):
 # ==========DATA COLLECTION==========
 
 def createframe(msg):
-    """transform the message from the API to a dataframe with only the data we want"""
+    """Transform the message from the API to a dataframe with only the data we want"""
     df = pd.DataFrame([msg])
     df = df.loc[:,['s','E','p']] # 1 row, 3 columns
     df.columns = ['symbol','time','price']
@@ -47,7 +51,12 @@ def createframe(msg):
     return df
 
 async def collect_data():
+    """
+    This function will acquire the requested data (price etc) from the binance api
+    """
+    global have_data
     # client = Client(keys.API_KEY, keys.SECRET_KEY)
+    have_data = False
 
     bsm = BinanceSocketManager(client)
 
@@ -58,13 +67,19 @@ async def collect_data():
     
     frame = createframe(msg) # create a frame to put into the database...
     frame.to_sql(TRADE_SYMBOL, engine, if_exists='append', index=False) # enter the frame into the database...
+    
+    stringified_frame = f"{frame['symbol'][0]} price as at {frame['time'][0]}: ${frame['price'][0]}"
 
-    print(frame)
+    print(stringified_frame)
+    have_data = True
 
 
 # ==========TRADING==========
 
 def order(side, quantity, symbol, order_type=ORDER_TYPE_MARKET):
+    """
+    This function will place an order once the conditions in trade_main() are met
+    """
     print("ORDERING")
     try:
         print("sending order")
@@ -80,20 +95,35 @@ def order(side, quantity, symbol, order_type=ORDER_TYPE_MARKET):
         log(f"Error with order: {e}")
         return False
     
-def same_as_line_above():
-    print("it should also print this function...?")
+async def during_data_collection():
+    """
+    This function will take place while we AWAIT the data from the binance API
+    """
+    global have_data
+    i = 0
+    while i < 30:
+        if not have_data:
+            print(f"Awaiting data: {str(i)}")
+            await asyncio.sleep(0.5)
+            i += 1
+        else:
+            break
         
 async def trade_main():
+    """
+    Runs the data collection as an asynchronous task, and once data is received runs it against the trade logic
+    """
     global in_position
     global position
+    global have_data
     log("Bot has started")
     
     while True:
         data_collection = asyncio.create_task(collect_data())
+        meanwhile = asyncio.create_task(during_data_collection())
         print("\nREQUESTING DATA...")
         await data_collection
-        print("this is just here to see if it carries on and prints this while it waits for the data")
-        same_as_line_above()
+        await meanwhile
         
         prices = pd.read_sql('ETHUSDT', engine)
         prices = prices['price'].values.tolist()
